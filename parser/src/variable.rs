@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::usize;
 
 use crate::file::FileHash;
-use crate::location::{FrameLocation, Location, Piece, Register};
+use crate::location::{self, FrameLocation, Location, Piece, Register};
 use crate::namespace::Namespace;
 use crate::range::Range;
 use crate::source::Source;
@@ -124,10 +124,16 @@ impl<'input> Variable<'input> {
     /// The address range of the variable.
     pub fn range(&self, hash: &FileHash) -> Option<Range> {
         match (self.address(), self.byte_size(hash)) {
-            (Some(begin), Some(size)) => Some(Range {
-                begin,
-                end: begin + size,
-            }),
+            (Some(begin), Some(size)) => {
+                if size != 0 {
+                    Some(Range {
+                        begin,
+                        end: begin + size,
+                    })
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -163,7 +169,7 @@ pub struct LocalVariable<'input> {
     pub(crate) source: Source<'input>,
     pub(crate) address: Address,
     pub(crate) size: Size,
-    pub(crate) locations: Vec<Piece>,
+    pub(crate) locations: Vec<(Range, Piece)>,
 }
 
 impl<'input> LocalVariable<'input> {
@@ -213,21 +219,18 @@ impl<'input> LocalVariable<'input> {
     }
 
     /// The registers in which this variable is stored.
-    pub fn registers<'a>(&'a self) -> impl Iterator<Item = Register> + 'a {
-        self.locations.iter().filter_map(|piece| {
-            if piece.is_value {
-                return None;
-            }
-            match piece.location {
-                Location::Register { register } => Some(register),
-                _ => None,
-            }
-        })
+    pub fn registers<'a>(&'a self) -> impl Iterator<Item = (Range, Register)> + 'a {
+        location::registers(&self.locations)
+    }
+
+    /// The registers pointing to where this variable is stored.
+    pub fn register_offsets<'a>(&'a self) -> impl Iterator<Item = (Range, Register, i64)> + 'a {
+        location::register_offsets(&self.locations)
     }
 
     /// The stack frame locations at which this variable is stored.
     pub fn frame_locations<'a>(&'a self) -> impl Iterator<Item = FrameLocation> + 'a {
-        self.locations.iter().filter_map(|piece| {
+        self.locations.iter().filter_map(|(_, piece)| {
             if piece.is_value {
                 return None;
             }

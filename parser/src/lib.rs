@@ -16,11 +16,9 @@
 //! });
 //! ```
 #![deny(missing_docs)]
-
 // Enable some rust 2018 idioms.
 #![warn(bare_trait_objects)]
 #![warn(unused_extern_crates)]
-
 // Calm down clippy.
 #![allow(clippy::new_ret_no_self)]
 #![allow(clippy::single_match)]
@@ -30,6 +28,7 @@
 #[macro_use]
 extern crate log;
 
+mod cfi;
 mod file;
 mod function;
 mod location;
@@ -40,6 +39,7 @@ mod types;
 mod unit;
 mod variable;
 
+pub use crate::cfi::*;
 pub use crate::file::*;
 pub use crate::function::*;
 pub use crate::location::*;

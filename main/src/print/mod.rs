@@ -5,7 +5,7 @@ use std::usize;
 
 use parser::FileHash;
 
-use crate::code::CodeRegion;
+use crate::code::Code;
 use crate::{Options, Result};
 
 mod text;
@@ -85,7 +85,11 @@ pub trait Printer {
 }
 
 pub trait ValuePrinter: Write {
-    fn link(&mut self, id: usize, f: &mut dyn FnMut(&mut dyn ValuePrinter) -> Result<()>) -> Result<()>;
+    fn link(
+        &mut self,
+        id: usize,
+        f: &mut dyn FnMut(&mut dyn ValuePrinter) -> Result<()>,
+    ) -> Result<()>;
 }
 
 pub(crate) struct PrintState<'a> {
@@ -94,7 +98,7 @@ pub(crate) struct PrintState<'a> {
 
     // The remaining fields contain information that is commonly needed in print methods.
     hash: &'a FileHash<'a>,
-    code: Option<&'a CodeRegion>,
+    code: Option<&'a Code<'a>>,
     options: &'a Options<'a>,
 }
 
@@ -112,7 +116,7 @@ impl<'a> PrintState<'a> {
     pub fn new(
         printer: &'a mut dyn Printer,
         hash: &'a FileHash<'a>,
-        code: Option<&'a CodeRegion>,
+        code: Option<&'a Code<'a>>,
         options: &'a Options<'a>,
     ) -> Self {
         PrintState {
@@ -285,8 +289,8 @@ pub(crate) struct DiffState<'a> {
     // The remaining fields contain information that is commonly needed in print methods.
     hash_a: &'a FileHash<'a>,
     hash_b: &'a FileHash<'a>,
-    code_a: Option<&'a CodeRegion>,
-    code_b: Option<&'a CodeRegion>,
+    code_a: Option<&'a Code<'a>>,
+    code_b: Option<&'a Code<'a>>,
     options: &'a Options<'a>,
 }
 
@@ -320,8 +324,8 @@ impl<'a> DiffState<'a> {
         printer: &'a mut dyn Printer,
         hash_a: &'a FileHash<'a>,
         hash_b: &'a FileHash<'a>,
-        code_a: Option<&'a CodeRegion>,
-        code_b: Option<&'a CodeRegion>,
+        code_a: Option<&'a Code<'a>>,
+        code_b: Option<&'a Code<'a>>,
         options: &'a Options<'a>,
     ) -> Self {
         DiffState {

@@ -1,6 +1,6 @@
 use parser::{File, FileHash, Unit};
 
-use crate::code::CodeRegion;
+use crate::code::Code;
 use crate::filter;
 use crate::print::{self, DiffState, MergeIterator, MergeResult, PrintState, Printer, SortList};
 use crate::{Options, Result};
@@ -132,7 +132,7 @@ fn merged_units<'a, 'input>(
 pub fn print(file: &File, printer: &mut dyn Printer, options: &Options) -> Result<()> {
     assign_ids(file, options);
     let hash = FileHash::new(file);
-    let code = CodeRegion::new(file);
+    let code = Code::new(file);
     let mut state = PrintState::new(printer, &hash, code.as_ref(), options);
 
     if options.category_file {
@@ -166,11 +166,16 @@ pub fn print(file: &File, printer: &mut dyn Printer, options: &Options) -> Resul
     state.sort_list(&(), &mut filter::filter_units(file, options))
 }
 
-pub fn diff(printer: &mut dyn Printer, file_a: &File, file_b: &File, options: &Options) -> Result<()> {
+pub fn diff(
+    printer: &mut dyn Printer,
+    file_a: &File,
+    file_b: &File,
+    options: &Options,
+) -> Result<()> {
     let hash_a = FileHash::new(file_a);
     let hash_b = FileHash::new(file_b);
-    let code_a = CodeRegion::new(file_a);
-    let code_b = CodeRegion::new(file_b);
+    let code_a = Code::new(file_a);
+    let code_b = Code::new(file_b);
     assign_merged_ids(&hash_a, file_a, &hash_b, file_b, options);
 
     let mut state = DiffState::new(

@@ -1,7 +1,6 @@
 // Enable some rust 2018 idioms.
 #![warn(bare_trait_objects)]
 #![warn(unused_extern_crates)]
-
 // Calm down clippy.
 #![allow(clippy::new_ret_no_self)]
 #![allow(clippy::single_match)]
@@ -40,6 +39,7 @@ pub struct Options<'a> {
     pub print_file_address: bool,
     pub print_unit_address: bool,
     pub print_function_calls: bool,
+    pub print_function_instructions: bool,
     pub print_function_variables: bool,
     pub print_function_stack_frame: bool,
     pub print_inlined_function_parameters: bool,

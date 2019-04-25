@@ -4,6 +4,7 @@ use std::cmp;
 use std::rc::Rc;
 use std::usize;
 
+use crate::cfi::Cfi;
 use crate::file::FileHash;
 use crate::location::{self, FrameLocation, Piece, Register};
 use crate::namespace::Namespace;
@@ -197,6 +198,11 @@ impl<'input> Function<'input> {
         hash.file.get_function_details(self.offset, hash)
     }
 
+    /// Call frame information.
+    pub fn cfi(&self, hash: &FileHash<'input>) -> Vec<Cfi> {
+        hash.file.get_cfi(self.address, self.size)
+    }
+
     /// Compare the identifying information of two functions.
     ///
     /// Functions are equal if they have the same namespace and name.
@@ -263,7 +269,7 @@ pub struct Parameter<'input> {
     pub(crate) name: Option<&'input str>,
     pub(crate) ty: TypeOffset,
     // TODO: move this to ParameterDetails
-    pub(crate) locations: Vec<Piece>,
+    pub(crate) locations: Vec<(Range, Piece)>,
 }
 
 impl<'input> Parameter<'input> {
@@ -293,8 +299,13 @@ impl<'input> Parameter<'input> {
     }
 
     /// The registers in which this parameter is stored.
-    pub fn registers<'a>(&'a self) -> impl Iterator<Item = Register> + 'a {
+    pub fn registers<'a>(&'a self) -> impl Iterator<Item = (Range, Register)> + 'a {
         location::registers(&self.locations)
+    }
+
+    /// The registers pointing to where this variable is stored.
+    pub fn register_offsets<'a>(&'a self) -> impl Iterator<Item = (Range, Register, i64)> + 'a {
+        location::register_offsets(&self.locations)
     }
 
     /// The stack frame locations at which this parameter is stored.

@@ -36,6 +36,8 @@ pub enum TypeKind<'input> {
     PointerToMember(PointerToMemberType),
     /// A type that is obtained by adding a modifier to another type.
     Modifier(TypeModifier<'input>),
+    /// A subrange of another type.
+    Subrange(SubrangeType<'input>),
 }
 
 impl<'input> TypeKind<'input> {
@@ -52,6 +54,7 @@ impl<'input> TypeKind<'input> {
             TypeKind::Unspecified(..) => 9,
             TypeKind::PointerToMember(..) => 10,
             TypeKind::Modifier(..) => 11,
+            TypeKind::Subrange(..) => 12,
         }
     }
 }
@@ -193,6 +196,7 @@ impl<'input> Type<'input> {
             TypeKind::Unspecified(..) => None,
             TypeKind::PointerToMember(ref val) => val.byte_size(hash),
             TypeKind::Modifier(ref val) => val.byte_size(hash),
+            TypeKind::Subrange(ref val) => val.byte_size(hash),
         }
     }
 
@@ -209,7 +213,8 @@ impl<'input> Type<'input> {
             | TypeKind::Function(..)
             | TypeKind::Unspecified(..)
             | TypeKind::PointerToMember(..)
-            | TypeKind::Modifier(..) => false,
+            | TypeKind::Modifier(..)
+            | TypeKind::Subrange(..) => false,
         }
     }
 
@@ -232,15 +237,16 @@ impl<'input> Type<'input> {
             | TypeKind::Enumeration(..)
             | TypeKind::Array(..)
             | TypeKind::Unspecified(..)
-            | TypeKind::PointerToMember(..) => false,
+            | TypeKind::PointerToMember(..)
+            | TypeKind::Subrange(..) => false,
         }
     }
 
-    /// If this is a type that has members, then call 'f' for each member of this type.
-    pub fn visit_members(&self, f: &mut dyn FnMut(&Member) -> ()) {
+    /// The members of this type.
+    pub fn members(&self) -> &[Member<'input>] {
         match self.kind {
-            TypeKind::Struct(ref val) => val.visit_members(f),
-            TypeKind::Union(ref val) => val.visit_members(f),
+            TypeKind::Struct(ref val) => val.members(),
+            TypeKind::Union(ref val) => val.members(),
             TypeKind::Void
             | TypeKind::Enumeration(..)
             | TypeKind::Def(..)
@@ -249,7 +255,8 @@ impl<'input> Type<'input> {
             | TypeKind::Function(..)
             | TypeKind::Unspecified(..)
             | TypeKind::PointerToMember(..)
-            | TypeKind::Modifier(..) => {}
+            | TypeKind::Modifier(..)
+            | TypeKind::Subrange(..) => &[],
         }
     }
 
@@ -280,6 +287,7 @@ impl<'input> Type<'input> {
                 PointerToMemberType::cmp_id(hash_a, a, hash_b, b)
             }
             (&Modifier(ref a), &Modifier(ref b)) => TypeModifier::cmp_id(hash_a, a, hash_b, b),
+            (&Subrange(ref a), &Subrange(ref b)) => SubrangeType::cmp_id(hash_a, a, hash_b, b),
             _ => {
                 let discr_a = type_a.kind.discriminant_value();
                 let discr_b = type_b.kind.discriminant_value();
@@ -368,11 +376,7 @@ impl<'input> TypeModifier<'input> {
         Type::from_offset(hash, self.ty)
     }
 
-    /// The size in bytes of an instance of this type.
-    pub fn byte_size(&self, hash: &FileHash) -> Option<u64> {
-        if self.byte_size.is_some() {
-            return self.byte_size.get();
-        }
+    fn is_pointer_like(&self) -> bool {
         match self.kind {
             TypeModifierKind::Const
             | TypeModifierKind::Packed
@@ -380,10 +384,22 @@ impl<'input> TypeModifier<'input> {
             | TypeModifierKind::Restrict
             | TypeModifierKind::Shared
             | TypeModifierKind::Atomic
-            | TypeModifierKind::Other => self.ty(hash).and_then(|v| v.byte_size(hash)),
+            | TypeModifierKind::Other => false,
             TypeModifierKind::Pointer
             | TypeModifierKind::Reference
-            | TypeModifierKind::RvalueReference => self.address_size,
+            | TypeModifierKind::RvalueReference => true,
+        }
+    }
+
+    /// The size in bytes of an instance of this type.
+    pub fn byte_size(&self, hash: &FileHash) -> Option<u64> {
+        if self.byte_size.is_some() {
+            return self.byte_size.get();
+        }
+        if self.is_pointer_like() {
+            self.address_size
+        } else {
+            self.ty(hash).and_then(|v| v.byte_size(hash))
         }
     }
 
@@ -511,6 +527,7 @@ pub struct StructType<'input> {
     pub(crate) byte_size: Size,
     pub(crate) declaration: bool,
     pub(crate) members: Vec<Member<'input>>,
+    pub(crate) variant_parts: Vec<VariantPart<'input>>,
     pub(crate) inherits: Vec<Inherit>,
 }
 
@@ -530,6 +547,12 @@ impl<'input> StructType<'input> {
     #[inline]
     pub fn source(&self) -> &Source<'input> {
         &self.source
+    }
+
+    /// The size in bytes of an instance of this type.
+    #[inline]
+    pub fn bit_size(&self) -> Option<u64> {
+        self.byte_size.get().map(|v| v * 8)
     }
 
     /// The size in bytes of an instance of this type.
@@ -555,11 +578,10 @@ impl<'input> StructType<'input> {
         &self.members
     }
 
-    /// Call 'f' for each member of this type.
-    pub fn visit_members(&self, f: &mut dyn FnMut(&Member) -> ()) {
-        for member in &self.members {
-            f(member);
-        }
+    /// The variant parts of this type.
+    #[inline]
+    pub fn variant_parts(&self) -> &[VariantPart<'input>] {
+        &self.variant_parts
     }
 
     /// The inherited types.
@@ -570,47 +592,14 @@ impl<'input> StructType<'input> {
 
     /// The layout of members of this type.
     pub fn layout<'me>(&'me self, hash: &FileHash) -> Vec<Layout<'input, 'me>> {
-        let mut members: Vec<_> = self
-            .members
-            .iter()
-            .map(|member| Layout {
-                bit_offset: member.bit_offset(),
-                bit_size: member.bit_size(hash).into(),
-                item: LayoutItem::Member(member),
-            })
-            .collect();
-        members.extend(self.inherits().iter().map(|inherit| Layout {
-            bit_offset: inherit.bit_offset(),
-            bit_size: inherit.bit_size(hash).into(),
-            item: LayoutItem::Inherit(inherit),
-        }));
-        members.sort_by(|a, b| {
-            a.bit_offset
-                .cmp(&b.bit_offset)
-                .then_with(|| a.bit_size.cmp(&b.bit_size))
-        });
-
-        let mut next_bit_offset = self.byte_size().map(|v| v * 8);
-        let mut layout = Vec::new();
-        for member in members.into_iter().rev() {
-            if let (Some(bit_size), Some(next_bit_offset)) =
-                (member.bit_size.get(), next_bit_offset)
-            {
-                let bit_offset = member.bit_offset + bit_size;
-                if next_bit_offset > bit_offset {
-                    let bit_size = next_bit_offset - bit_offset;
-                    layout.push(Layout {
-                        bit_offset,
-                        bit_size: Size::new(bit_size),
-                        item: LayoutItem::Padding,
-                    });
-                }
-            }
-            next_bit_offset = Some(member.bit_offset);
-            layout.push(member);
-        }
-        layout.reverse();
-        layout
+        layout(
+            &*self.members,
+            &*self.inherits,
+            &*self.variant_parts,
+            0,
+            self.bit_size(),
+            hash,
+        )
     }
 
     /// Compare the identifying information of two types.
@@ -676,13 +665,6 @@ impl<'input> UnionType<'input> {
         &self.members
     }
 
-    /// Call 'f' for each member of this type.
-    pub fn visit_members(&self, f: &mut dyn FnMut(&Member) -> ()) {
-        for member in &self.members {
-            f(member);
-        }
-    }
-
     /// Compare the identifying information of two types.
     ///
     /// Unions are considered equal if their names are equal.
@@ -694,9 +676,195 @@ impl<'input> UnionType<'input> {
     }
 }
 
+/// A variant part.
+///
+/// A variant part is a discriminant member and list of variants that are
+/// selected based on the value of the discriminant member.
+#[derive(Debug, Default, Clone)]
+pub struct VariantPart<'input> {
+    pub(crate) discr: MemberOffset,
+    pub(crate) variants: Vec<Variant<'input>>,
+}
+
+impl<'input> VariantPart<'input> {
+    /// The discriminant member for this variant part.
+    ///
+    /// The given members should be from the type containing this variant part.
+    #[inline]
+    pub fn discriminant<'a>(&self, members: &'a [Member<'input>]) -> Option<&'a Member<'input>> {
+        for member in members {
+            if member.offset == self.discr {
+                return Some(member);
+            }
+        }
+        None
+    }
+
+    /// The variants for this variant part.
+    #[inline]
+    pub fn variants(&self) -> &[Variant<'input>] {
+        &self.variants
+    }
+
+    /// The smallest offset in bits for a variant of this variant part.
+    pub fn bit_offset(&self) -> u64 {
+        let mut bit_offset = u64::max_value();
+        for variant in &self.variants {
+            let o = variant.bit_offset();
+            if bit_offset > o {
+                bit_offset = o;
+            }
+        }
+        if bit_offset < u64::max_value() {
+            bit_offset
+        } else {
+            0
+        }
+    }
+
+    /// The largest size in bits for the variants of this variant part,
+    /// excluding leading and trailing padding.
+    pub fn bit_size(&self, hash: &FileHash) -> Option<u64> {
+        let start = self.bit_offset();
+        let mut end = start;
+        for variant in &self.variants {
+            let o = variant.bit_offset();
+            if let Some(size) = variant.bit_size(hash) {
+                if end < o + size {
+                    end = o + size;
+                }
+            } else {
+                return None;
+            }
+        }
+        Some(end - start)
+    }
+}
+
+/// A variant.
+///
+/// A variant consists of a discriminant value that selects the variant,
+/// and a list of members that are valid when the variant is selected.
+#[derive(Debug, Default, Clone)]
+pub struct Variant<'input> {
+    pub(crate) discr: MemberOffset,
+    pub(crate) discr_value: Option<u64>,
+    pub(crate) name: Option<&'input str>,
+    pub(crate) members: Vec<Member<'input>>,
+}
+
+impl<'input> Variant<'input> {
+    /// The discriminant value which selects this variant.
+    ///
+    /// The sign of this value depends on the type of the discriminant member.
+    #[inline]
+    pub fn discriminant_value(&self) -> Option<u64> {
+        self.discr_value
+    }
+
+    /// The name of the variant.
+    ///
+    /// Currently this is only set for Rust enums.
+    #[inline]
+    pub fn name(&self) -> Option<&str> {
+        self.name
+    }
+
+    /// The members for this variant.
+    #[inline]
+    pub fn members(&self) -> &[Member<'input>] {
+        &self.members
+    }
+
+    /// The smallest offset in bits for a member of this variant.
+    pub fn bit_offset(&self) -> u64 {
+        let mut bit_offset = u64::max_value();
+        for member in &self.members {
+            let o = member.bit_offset();
+            if bit_offset > o {
+                bit_offset = o;
+            }
+        }
+        if bit_offset < u64::max_value() {
+            bit_offset
+        } else {
+            0
+        }
+    }
+
+    /// The size in bits for the members of this variant, excluding leading and trailing padding.
+    pub fn bit_size(&self, hash: &FileHash) -> Option<u64> {
+        let start = self.bit_offset();
+        let mut end = start;
+        for member in &self.members {
+            let o = member.bit_offset();
+            if let Some(size) = member.bit_size(hash) {
+                if end < o + size {
+                    end = o + size;
+                }
+            } else {
+                return None;
+            }
+        }
+        Some(end - start)
+    }
+
+    /// The layout of members of this variant within a variant part.
+    ///
+    /// The given bit_offset and bit_size should be for the variant part.
+    pub fn layout<'me>(
+        &'me self,
+        bit_offset: u64,
+        bit_size: Option<u64>,
+        hash: &FileHash<'input>,
+    ) -> Vec<Layout<'input, 'me>> {
+        layout(&*self.members, &[], &[], bit_offset, bit_size, hash)
+    }
+
+    /// Compare the identifying information of two types.
+    ///
+    /// Variants are considered equal if the discriminant values are equal.
+    ///
+    /// This can be used to sort, and to determine if two types refer to the same definition
+    /// (even if there are differences in the definitions).
+    // TODO: compare discriminant member too
+    pub fn cmp_id(
+        _hash_a: &FileHash,
+        a: &Variant,
+        _hash_b: &FileHash,
+        b: &Variant,
+    ) -> cmp::Ordering {
+        a.discr_value.cmp(&b.discr_value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MemberOffset(usize);
+
+impl MemberOffset {
+    #[inline]
+    pub(crate) fn new(offset: usize) -> MemberOffset {
+        debug_assert!(MemberOffset(offset) != MemberOffset::none());
+        MemberOffset(offset)
+    }
+
+    #[inline]
+    pub(crate) fn none() -> MemberOffset {
+        MemberOffset(usize::MAX)
+    }
+}
+
+impl Default for MemberOffset {
+    #[inline]
+    fn default() -> Self {
+        MemberOffset::none()
+    }
+}
+
 /// A member of a struct or union.
 #[derive(Debug, Default, Clone)]
 pub struct Member<'input> {
+    pub(crate) offset: MemberOffset,
     pub(crate) name: Option<&'input str>,
     pub(crate) ty: TypeOffset,
     // Defaults to 0, so always present.
@@ -808,8 +976,72 @@ pub enum LayoutItem<'input, 'item> {
     Padding,
     /// A member.
     Member(&'item Member<'input>),
+    /// A variant part.
+    VariantPart(&'item VariantPart<'input>),
     /// An inherited type.
     Inherit(&'item Inherit),
+}
+
+fn layout<'input, 'item>(
+    members: &'item [Member<'input>],
+    inherits: &'item [Inherit],
+    variant_parts: &'item [VariantPart<'input>],
+    base_bit_offset: u64,
+    bit_size: Option<u64>,
+    hash: &FileHash,
+) -> Vec<Layout<'input, 'item>> {
+    let mut members: Vec<_> = members
+        .iter()
+        .map(|member| Layout {
+            bit_offset: member.bit_offset() - base_bit_offset,
+            bit_size: member.bit_size(hash).into(),
+            item: LayoutItem::Member(member),
+        })
+        .collect();
+    members.extend(inherits.iter().map(|inherit| Layout {
+        bit_offset: inherit.bit_offset() - base_bit_offset,
+        bit_size: inherit.bit_size(hash).into(),
+        item: LayoutItem::Inherit(inherit),
+    }));
+    members.extend(variant_parts.iter().map(|variant_part| Layout {
+        bit_offset: variant_part.bit_offset() - base_bit_offset,
+        bit_size: variant_part.bit_size(hash).into(),
+        item: LayoutItem::VariantPart(variant_part),
+    }));
+    members.sort_by(|a, b| {
+        a.bit_offset
+            .cmp(&b.bit_offset)
+            .then_with(|| a.bit_size.cmp(&b.bit_size))
+    });
+
+    let mut next_bit_offset = bit_size;
+    let mut layout = Vec::new();
+    for member in members.into_iter().rev() {
+        if let (Some(bit_size), Some(next_bit_offset)) = (member.bit_size.get(), next_bit_offset) {
+            let bit_offset = member.bit_offset + bit_size;
+            if next_bit_offset > bit_offset {
+                let bit_size = next_bit_offset - bit_offset;
+                layout.push(Layout {
+                    bit_offset,
+                    bit_size: Size::new(bit_size),
+                    item: LayoutItem::Padding,
+                });
+            }
+        }
+        next_bit_offset = Some(member.bit_offset);
+        layout.push(member);
+    }
+    if let Some(first_bit_offset) = layout.last().map(|x| x.bit_offset) {
+        if first_bit_offset > 0 {
+            layout.push(Layout {
+                bit_offset: 0,
+                bit_size: Size::new(first_bit_offset),
+                item: LayoutItem::Padding,
+            });
+        }
+    }
+    layout.reverse();
+    layout
 }
 
 /// An enumeration type.
@@ -966,6 +1198,81 @@ impl<'input> ArrayType<'input> {
             (None, None) => {}
         }
         a.count.cmp(&b.count)
+    }
+}
+
+/// A subrange of another type.
+#[derive(Debug, Default, Clone)]
+pub struct SubrangeType<'input> {
+    pub(crate) name: Option<&'input str>,
+    pub(crate) ty: TypeOffset,
+    pub(crate) lower: Option<u64>,
+    pub(crate) upper: Option<u64>,
+    pub(crate) byte_size: Size,
+}
+
+impl<'input> SubrangeType<'input> {
+    /// The name of the subrange.
+    #[inline]
+    pub fn name(&self) -> Option<&'input str> {
+        self.name
+    }
+
+    /// The underlying type of the subrange.
+    #[inline]
+    pub fn ty<'a>(&self, hash: &'a FileHash<'input>) -> Option<Cow<'a, Type<'input>>> {
+        Type::from_offset(hash, self.ty)
+    }
+
+    /// The lower bound of the subrange (inclusive).
+    #[inline]
+    pub fn lower(&self) -> Option<u64> {
+        self.lower
+    }
+
+    /// The upper bound of the subrange (inclusive).
+    #[inline]
+    pub fn upper(&self) -> Option<u64> {
+        self.upper
+    }
+
+    /// The size in bytes of an instance of this type.
+    pub fn byte_size(&self, hash: &FileHash) -> Option<u64> {
+        if self.byte_size.is_some() {
+            self.byte_size.get()
+        } else {
+            self.ty(hash).and_then(|v| v.byte_size(hash))
+        }
+    }
+
+    /// Compare the identifying information of two types.
+    ///
+    /// Subrange types are considered equal if the underlying type and bounds are equal.
+    ///
+    /// This can be used to sort, and to determine if two types refer to the same definition
+    /// (even if there are differences in the definitions).
+    pub fn cmp_id(
+        hash_a: &FileHash,
+        a: &SubrangeType,
+        hash_b: &FileHash,
+        b: &SubrangeType,
+    ) -> cmp::Ordering {
+        match (a.ty(hash_a), b.ty(hash_b)) {
+            (Some(ref ty_a), Some(ref ty_b)) => {
+                let ord = Type::cmp_id(hash_a, ty_a, hash_b, ty_b);
+                if ord != cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(_), None) => {
+                return cmp::Ordering::Less;
+            }
+            (None, Some(_)) => {
+                return cmp::Ordering::Greater;
+            }
+            (None, None) => {}
+        }
+        a.lower.cmp(&b.lower).then_with(|| a.upper.cmp(&b.upper))
     }
 }
 

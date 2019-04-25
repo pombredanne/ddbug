@@ -11,7 +11,7 @@ edition = "2018"
 
 [dependencies]
 fnv = "1.0"
-gimli = { git = "https://github.com/gimli-rs/gimli", rev = "d23b4f5fc4f4d60c33ea6d375d9f61543ea5a136" }
+gimli = { git = "https://github.com/gimli-rs/gimli", rev = "f405adae0b78bc2755f8bbf146e86a1a692fc05f" }
 log = "0.4"
 memmap = "0.7"
 moria = { git = "https://github.com/gimli-rs/moria", rev = "83e27832cd70f33ce835726d6b91f064ae0cb50f" }

@@ -2,19 +2,14 @@ use std::borrow::Cow;
 use std::cmp;
 use std::ops::Deref;
 
-use parser::{FileHash, Inherit, Layout, LayoutItem, Member, Type, Unit};
+use parser::{FileHash, Inherit, Layout, LayoutItem, Member, Type, Unit, Variant, VariantPart};
 
 use crate::print::{self, DiffList, DiffState, Print, PrintState, ValuePrinter};
 use crate::Result;
 
-fn print_name(
-    member: &Member,
-    w: &mut dyn ValuePrinter,
-    hash: &FileHash,
-    bit_size: Option<u64>,
-) -> Result<()> {
+fn print_member(member: &Member, w: &mut dyn ValuePrinter, hash: &FileHash) -> Result<()> {
     write!(w, "{}", format_bit(member.bit_offset()))?;
-    match bit_size {
+    match member.bit_size(hash) {
         Some(bit_size) => {
             write!(w, "[{}]", format_bit(bit_size))?;
         }
@@ -26,6 +21,30 @@ fn print_name(
     }
     write!(w, "\t{}: ", member.name().unwrap_or("<anon>"))?;
     print::types::print_ref(member.ty(hash), w, hash)?;
+    Ok(())
+}
+
+fn print_variant_part(
+    layout: &Layout,
+    _variant_part: &VariantPart,
+    w: &mut dyn ValuePrinter,
+) -> Result<()> {
+    // TODO: indicate which discriminant
+    write!(
+        w,
+        "{}[{}]\t<variant part>",
+        format_bit(layout.bit_offset),
+        format_bit(layout.bit_size.get().unwrap_or(0)),
+    )?;
+    Ok(())
+}
+
+fn print_variant(variant: &Variant, w: &mut dyn ValuePrinter) -> Result<()> {
+    if let Some(name) = variant.name() {
+        write!(w, "{}: ", name)?;
+    }
+    // TODO: use discriminant type to display value
+    write!(w, "<{}>", variant.discriminant_value().unwrap_or(0))?;
     Ok(())
 }
 
@@ -60,7 +79,6 @@ impl<'input> Print for Member<'input> {
 
     fn print(&self, state: &mut PrintState, unit: &Unit) -> Result<()> {
         let hash = state.hash();
-        let bit_size = self.bit_size(hash);
         let ty = if self.is_inline(hash) {
             self.ty(hash)
         } else {
@@ -68,14 +86,12 @@ impl<'input> Print for Member<'input> {
         };
         let ty = ty.as_ref().map(Cow::deref);
         state.expanded(
-            |state| state.line(|w, state| print_name(self, w, state, bit_size)),
+            |state| state.line(|w, hash| print_member(self, w, hash)),
             |state| print::types::print_members(state, unit, ty),
         )
     }
 
     fn diff(state: &mut DiffState, unit_a: &Unit, a: &Self, unit_b: &Unit, b: &Self) -> Result<()> {
-        let bit_size_a = a.bit_size(state.hash_a());
-        let bit_size_b = b.bit_size(state.hash_b());
         let ty_a = if a.is_inline(state.hash_a()) {
             a.ty(state.hash_a())
         } else {
@@ -89,13 +105,7 @@ impl<'input> Print for Member<'input> {
         };
         let ty_b = ty_b.as_ref().map(Cow::deref);
         state.expanded(
-            |state| {
-                state.line(
-                    (a, bit_size_a),
-                    (b, bit_size_b),
-                    |w, state, (x, bit_size)| print_name(x, w, state, bit_size),
-                )
-            },
+            |state| state.line(a, b, |w, hash, x| print_member(x, w, hash)),
             |state| print::types::diff_members(state, unit_a, ty_a, unit_b, ty_b),
         )
     }
@@ -127,6 +137,58 @@ impl<'input> DiffList for Member<'input> {
     }
 }
 
+impl<'input> Print for Variant<'input> {
+    type Arg = (&'input Unit<'input>, u64, Option<u64>);
+
+    fn print(
+        &self,
+        state: &mut PrintState,
+        (unit, bit_offset, bit_size): &Self::Arg,
+    ) -> Result<()> {
+        state.expanded(
+            |state| state.line(|w, _hash| print_variant(self, w)),
+            |state| {
+                let layout = self.layout(*bit_offset, *bit_size, state.hash());
+                state.list(*unit, &layout)
+            },
+        )
+    }
+
+    fn diff(
+        state: &mut DiffState,
+        (unit_a, bit_offset_a, bit_size_a): &Self::Arg,
+        a: &Self,
+        (unit_b, bit_offset_b, bit_size_b): &Self::Arg,
+        b: &Self,
+    ) -> Result<()> {
+        state.expanded(
+            |state| state.line(a, b, |w, _hash, variant| print_variant(variant, w)),
+            |state| {
+                let layout_a = a.layout(*bit_offset_a, *bit_size_a, state.hash_a());
+                let layout_b = b.layout(*bit_offset_b, *bit_size_b, state.hash_b());
+                state.list(*unit_a, &layout_a, *unit_b, &layout_b)
+            },
+        )
+    }
+}
+
+impl<'input> DiffList for Variant<'input> {
+    fn step_cost(&self, _state: &DiffState, _arg: &Self::Arg) -> usize {
+        1
+    }
+
+    fn diff_cost(
+        _state: &DiffState,
+        _arg_a: &Self::Arg,
+        _a: &Self,
+        _arg_b: &Self::Arg,
+        _b: &Self,
+    ) -> usize {
+        // TODO
+        2
+    }
+}
+
 impl<'input, 'member> Print for Layout<'input, 'member> {
     type Arg = Unit<'input>;
 
@@ -134,6 +196,15 @@ impl<'input, 'member> Print for Layout<'input, 'member> {
         match self.item {
             LayoutItem::Padding => state.line(|w, _hash| print_padding(self, w)),
             LayoutItem::Member(member) => member.print(state, unit),
+            LayoutItem::VariantPart(variant_part) => state.expanded(
+                |state| state.line(|w, _hash| print_variant_part(self, variant_part, w)),
+                |state| {
+                    state.list(
+                        &(unit, self.bit_offset, self.bit_size.get()),
+                        variant_part.variants(),
+                    )
+                },
+            ),
             LayoutItem::Inherit(inherit) => {
                 state.line(|w, hash| print_inherit(self, inherit, w, hash))
             }
@@ -145,9 +216,31 @@ impl<'input, 'member> Print for Layout<'input, 'member> {
             (&LayoutItem::Padding, &LayoutItem::Padding) => {
                 state.line(a, b, |w, _hash, x| print_padding(x, w))
             }
-            (&LayoutItem::Member(ref a), &LayoutItem::Member(ref b)) => {
-                Member::diff(state, unit_a, a, unit_b, b)
+            (&LayoutItem::Member(ref member_a), &LayoutItem::Member(ref member_b)) => {
+                Member::diff(state, unit_a, member_a, unit_b, member_b)
             }
+            (
+                &LayoutItem::VariantPart(ref variant_part_a),
+                &LayoutItem::VariantPart(ref variant_part_b),
+            ) => state.expanded(
+                |state| {
+                    state.line(
+                        (a, variant_part_a),
+                        (b, variant_part_b),
+                        |w, _hash, (x, v)| print_variant_part(x, v, w),
+                    )
+                },
+                |state| {
+                    let variants_a = variant_part_a.variants();
+                    let variants_b = variant_part_b.variants();
+                    state.list(
+                        &(unit_a, a.bit_offset, a.bit_size.get()),
+                        variants_a,
+                        &(unit_b, b.bit_offset, b.bit_size.get()),
+                        variants_b,
+                    )
+                },
+            ),
             (&LayoutItem::Inherit(ref inherit_a), &LayoutItem::Inherit(ref inherit_b)) => state
                 .line((a, inherit_a), (b, inherit_b), |w, hash, (x, inherit)| {
                     print_inherit(x, inherit, w, hash)
@@ -161,6 +254,7 @@ impl<'input, 'member> Print for Layout<'input, 'member> {
 
 impl<'input, 'member> DiffList for Layout<'input, 'member> {
     fn step_cost(&self, _state: &DiffState, _arg: &Unit) -> usize {
+        // Must be same as diff cost for each layout item
         1
     }
 
@@ -169,6 +263,10 @@ impl<'input, 'member> DiffList for Layout<'input, 'member> {
             (&LayoutItem::Padding, &LayoutItem::Padding) => 0,
             (&LayoutItem::Member(ref a), &LayoutItem::Member(ref b)) => {
                 Member::diff_cost(state, unit_a, a, unit_b, b)
+            }
+            (&LayoutItem::VariantPart(ref _a), &LayoutItem::VariantPart(ref _b)) => {
+                // TODO
+                2
             }
             (&LayoutItem::Inherit(ref a), &LayoutItem::Inherit(ref b)) => {
                 Inherit::diff_cost(state, &(), a, &(), b)

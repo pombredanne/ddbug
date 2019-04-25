@@ -11,9 +11,21 @@ pub struct Range {
 }
 
 impl Range {
+    /// A range that covers everything.
+    pub fn all() -> Self {
+        Range { begin: 0, end: !0 }
+    }
+
     /// The size of the address range.
+    #[inline]
     pub fn size(&self) -> u64 {
         self.end - self.begin
+    }
+
+    /// Return true if the range contains the value.
+    #[inline]
+    pub fn contains(&self, addr: u64) -> bool {
+        self.begin <= addr && addr < self.end
     }
 }
 
